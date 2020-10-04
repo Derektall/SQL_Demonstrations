@@ -1,0 +1,517 @@
+/* I use the Chinook database, which is sampled based on a digital media store (ala Itunes, Apple Music, etc.). Below is an example of how I would
+go about learning about the database design of an unknown database in order to understand it better and diagnose any performance issues*/
+
+Use Chinook
+
+--Seeing all the tables in the DB
+
+GO
+SELECT  *
+FROM    sys.objects
+WHERE   type = 'U'; 
+
+--Seeing any CHECK constraints 
+
+GO
+SELECT  *
+FROM    sys.objects
+WHERE   type = 'C';
+
+--Seeing any Stored Procedures 
+
+GO
+SELECT  *
+FROM    sys.objects
+WHERE   type = 'P';
+
+--Seeing any Foreign Keys 
+
+GO
+SELECT  *
+FROM    sys.objects
+WHERE   type = 'F';
+
+--Seeing all internal tables 
+
+GO
+SELECT  *
+FROM    sys.objects
+WHERE   type = 'IT';
+
+--Seeing any views 
+
+GO
+SELECT  *
+FROM    sys.objects
+WHERE   type = 'V';
+
+--Seeing all primary keys
+
+GO
+SELECT  *
+FROM    sys.objects
+WHERE   type = 'PK';
+
+--Check the physical location of the database and log files
+
+EXEC sp_Helpfile
+
+--Checking the schema of each table 
+
+SELECT  @@Servername AS ServerName ,
+	        TABLE_CATALOG ,
+	        TABLE_SCHEMA ,
+	        TABLE_NAME
+	FROM    INFORMATION_SCHEMA.TABLES
+	WHERE   TABLE_TYPE = 'BASE TABLE'
+	ORDER BY TABLE_NAME
+
+--Checking table types and date they were created 
+
+SELECT  @@Servername AS ServerName ,
+	        DB_NAME() AS DBName ,
+	        t.Name AS TableName,
+	        t.[Type],
+	        t.create_date
+	FROM    sys.tables t
+	ORDER BY t.Name;
+	GO
+
+SELECT  'Select ''' + DB_NAME() + '.' + SCHEMA_NAME(SCHEMA_ID) + '.'
+	        + LEFT(o.name, 128) + ''' as DBName, count(*) as Count From ' + o.name
+	        + ';' AS ' Script generator to get counts for all tables'
+	FROM    sys.objects o
+	WHERE   o.[type] = 'U'
+	ORDER BY o.name;
+	GO
+
+Select 'Chinook.dbo.Album' as DBName, count(*) as Count From Album;
+
+--A faster way of getting all of the row counts using clustered index (getting records from indexes not tables)
+
+SELECT  @@ServerName AS Server ,
+	        DB_NAME() AS DBName ,
+	        OBJECT_SCHEMA_NAME(p.object_id) AS SchemaName ,
+	        OBJECT_NAME(p.object_id) AS TableName ,
+	        i.Type_Desc ,
+	        i.Name AS IndexUsedForCounts ,
+	        SUM(p.Rows) AS Rows
+FROM    sys.partitions p
+	        JOIN sys.indexes i ON i.object_id = p.object_id
+
+	               AND i.index_id = p.index_id
+WHERE   i.type_desc IN ( 'CLUSTERED', 'HEAP' )
+                             -- Taking 1 index per table
+			       AND OBJECT_SCHEMA_NAME(p.object_id) <> 'sys'
+GROUP BY p.object_id ,
+	        i.type_desc ,
+	        i.Name
+	ORDER BY SchemaName ,
+	        TableName;
+
+--Finding heap tables (tables without a clustered index)
+
+SELECT  @@Servername AS ServerName ,
+	        DB_NAME() AS DBName ,
+	        t.Name AS HeapTable ,
+	        t.Create_Date
+	FROM    sys.tables t
+	        INNER JOIN sys.indexes i ON t.object_id = i.object_id
+	                                    AND i.type_desc = 'HEAP'
+	ORDER BY t.Name 
+
+--Seeing amount of table activity (reads and writes), heap tables are not included in this query because they do not have indexes
+
+SELECT  @@ServerName AS ServerName ,
+	        DB_NAME() AS DBName ,
+	        OBJECT_NAME(ddius.object_id) AS TableName ,
+	        SUM(ddius.user_seeks + ddius.user_scans + ddius.user_lookups)
+                                                               AS Reads ,
+	        SUM(ddius.user_updates) AS Writes ,
+	        SUM(ddius.user_seeks + ddius.user_scans + ddius.user_lookups
+	            + ddius.user_updates) AS [ReadsAndWrites] ,
+	        ( SELECT    DATEDIFF(s, create_date, GETDATE()) / 86400.0
+	          FROM      master.sys.databases
+	          WHERE     name = 'tempdb'
+	        ) AS SampleDays ,
+	        ( SELECT    DATEDIFF(s, create_date, GETDATE()) AS SecoundsRunnig
+	          FROM      master.sys.databases
+	          WHERE     name = 'tempdb'
+	        ) AS SampleSeconds
+	FROM    sys.dm_db_index_usage_stats ddius
+	        INNER JOIN sys.indexes i ON ddius.object_id = i.object_id
+	                                     AND i.index_id = ddius.index_id
+	WHERE   OBJECTPROPERTY(ddius.object_id, 'IsUserTable') = 1
+	        AND ddius.database_id = DB_ID()
+	GROUP BY OBJECT_NAME(ddius.object_id)
+	ORDER BY [ReadsAndWrites] DESC;
+	GO
+
+--Creating a summary of columns to see data types, scale, is nullable, etc. 
+
+	SELECT  @@Servername AS Server ,
+	        DB_NAME() AS DBName ,
+	        isc.Table_Name AS TableName ,
+	        isc.Table_Schema AS SchemaName ,
+	        Ordinal_Position AS Ord ,
+	        Column_Name ,
+	        Data_Type ,
+	        Numeric_Precision AS Prec ,
+	        Numeric_Scale AS Scale ,
+	        Character_Maximum_Length AS LEN , -- -1 means MAX like Varchar(MAX) 
+	        Is_Nullable ,
+	        Column_Default ,
+	        Table_Type
+	FROM    INFORMATION_SCHEMA.COLUMNS isc
+	        INNER JOIN information_schema.tables ist
+	              ON isc.table_name = ist.table_name 
+	--      WHERE Table_Type = 'BASE TABLE' -- 'Base Table' or 'View' 
+	ORDER BY DBName ,
+	        TableName ,
+	        SchemaName ,
+	        Ordinal_position; 
+
+--Getting column name counts
+
+    SELECT  @@Servername AS Server ,
+	        DB_NAME() AS DBName ,
+	        Column_Name ,
+	        Data_Type ,
+	        Numeric_Precision AS Prec ,
+	        Numeric_Scale AS Scale ,
+	        Character_Maximum_Length ,
+	        COUNT(*) AS Count
+	FROM    information_schema.columns isc
+	        INNER JOIN information_schema.tables ist
+	               ON isc.table_name = ist.table_name
+	WHERE   Table_type = 'BASE TABLE'
+	GROUP BY Column_Name ,
+	        Data_Type ,
+	        Numeric_Precision ,
+	        Numeric_Scale ,
+	        Character_Maximum_Length;
+
+--Seeing if there are any computed columns that use an equation to fill the values
+
+SELECT  @@Servername AS ServerName ,
+	        DB_NAME() AS DBName ,
+	        OBJECT_SCHEMA_NAME(object_id) AS SchemaName ,
+	        OBJECT_NAME(object_id) AS Tablename ,
+	        Column_id ,
+	        Name AS Computed_Column ,
+	        [Definition] ,
+	        is_persisted
+	FROM    sys.computed_columns
+	ORDER BY SchemaName ,
+	        Tablename ,
+	        [Definition]
+
+--Seeing if there are any identity columns that the database generates values for (order id's when new order gets processed, new hire id, etc.)
+
+SELECT  @@Servername AS ServerName ,
+	        DB_NAME() AS DBName ,
+	        OBJECT_SCHEMA_NAME(object_id) AS SchemaName ,
+	        OBJECT_NAME(object_id) AS TableName ,
+	        Column_id ,
+	        Name AS IdentityColumn ,
+	        Seed_Value ,
+	        Last_Value
+	FROM    sys.identity_columns
+	ORDER BY SchemaName ,
+	        TableName ,
+	        Column_id; 
+	GO
+
+--Checking for present indexes
+
+	SELECT  @@Servername AS ServerName ,
+	        DB_NAME() AS DB_Name ,
+	        o.Name AS TableName ,
+	        i.Name AS IndexName
+	FROM    sys.objects o
+	        INNER JOIN sys.indexes i ON o.object_id = i.object_id
+	WHERE   o.Type = 'U' 
+	        AND LEFT(i.Name, 1) <> '_' 
+	ORDER BY o.NAME ,
+	        i.name; 
+	GO
+
+--We can also check to see if there are any indexes that are missing/could be added based on dynamic management views
+
+SELECT  @@ServerName AS ServerName ,
+	        DB_NAME() AS DBName ,
+	        t.name AS 'Affected_table' ,
+	        ( LEN(ISNULL(ddmid.equality_columns, N'')
+	              + CASE WHEN ddmid.equality_columns IS NOT NULL
+	                          AND ddmid.inequality_columns IS NOT NULL THEN ','
+	                     ELSE ''
+	                END) - LEN(REPLACE(ISNULL(ddmid.equality_columns, N'')
+	                                   + CASE WHEN ddmid.equality_columns
+	                                                             IS NOT NULL
+	                                               AND ddmid.inequality_columns
+	                                                             IS NOT NULL
+	                                          THEN ','
+	                                          ELSE ''
+	                                     END, ',', '')) ) + 1 AS K ,
+	        COALESCE(ddmid.equality_columns, '')
+	        + CASE WHEN ddmid.equality_columns IS NOT NULL
+	                    AND ddmid.inequality_columns IS NOT NULL THEN ','
+	               ELSE ''
+	          END + COALESCE(ddmid.inequality_columns, '') AS Keys ,
+	        COALESCE(ddmid.included_columns, '') AS [include] ,
+	        'Create NonClustered Index IX_' + t.name + '_missing_'
+	        + CAST(ddmid.index_handle AS VARCHAR(20)) 
+	        + ' On ' + ddmid.[statement] COLLATE database_default
+	        + ' (' + ISNULL(ddmid.equality_columns, '')
+	        + CASE WHEN ddmid.equality_columns IS NOT NULL
+	                    AND ddmid.inequality_columns IS NOT NULL THEN ','
+	               ELSE ''
+	          END + ISNULL(ddmid.inequality_columns, '') + ')'
+	        + ISNULL(' Include (' + ddmid.included_columns + ');', ';')
+	                                                  AS sql_statement ,
+	        ddmigs.user_seeks ,
+	        ddmigs.user_scans ,
+	        CAST(( ddmigs.user_seeks + ddmigs.user_scans )
+	        * ddmigs.avg_user_impact AS BIGINT) AS 'est_impact' ,
+	        avg_user_impact ,
+	        ddmigs.last_user_seek ,
+	        ( SELECT    DATEDIFF(Second, create_date, GETDATE()) Seconds
+	          FROM      sys.databases
+	          WHERE     name = 'tempdb'
+	        ) SecondsUptime 
+	-- Select * 
+	FROM    sys.dm_db_missing_index_groups ddmig
+	        INNER JOIN sys.dm_db_missing_index_group_stats ddmigs
+	               ON ddmigs.group_handle = ddmig.index_group_handle
+	        INNER JOIN sys.dm_db_missing_index_details ddmid
+	               ON ddmig.index_handle = ddmid.index_handle
+	        INNER JOIN sys.tables t ON ddmid.OBJECT_ID = t.OBJECT_ID
+	WHERE   ddmid.database_id = DB_ID()
+	ORDER BY est_impact DESC;
+	GO
+
+/* Finding all object dependencies in the database. This can be useful if data needs to be archived or deleted withiout messing up tables and constraints.
+Once the dependency is listed with a sequence number we can start archiving/deleting the largest sequence number and go up from there to avoid complications. */
+
+--Listing all dependencies in a database
+
+EXEC sp_msdependencies NULL
+
+--We can go further and find what dependencies a table makes and how many dependencies reference a table respectively
+
+SELECT Coalesce(Object_Schema_Name(referencing_id) + '.', '')
+       + --likely schema name
+  Object_Name(referencing_id) + --definite entity name
+  Coalesce('.' + Col_Name(referencing_id, referencing_minor_id), '') AS referencing,
+  Coalesce(referenced_server_name + '.', '')
+  + --possible server name if cross-server
+  Coalesce(referenced_database_name + '.', '')
+  + --possible database name if cross-database
+  Coalesce(referenced_schema_name + '.', '')
+  + --likely schema name
+  Coalesce(referenced_entity_name, '')
+  + --very likely entity name
+  Coalesce('.' + Col_Name(referenced_id, referenced_minor_id), '') AS referenced
+  FROM sys.sql_expression_dependencies
+  WHERE referencing_id = Object_Id('Chinook.Artist')
+  ORDER BY referenced;
+
+  SELECT Coalesce(referenced_server_name + '.', '')
+       + --possible server name if cross-server
+  Coalesce(referenced_database_name + '.', '')
+       + --possible database name if cross-database
+  Coalesce(referenced_schema_name + '.', '') + --likely schema name
+  Coalesce(referenced_entity_name, '') + --very likely entity name
+  Coalesce('.' + Col_Name(referenced_id, referenced_minor_id), '') AS referencing,
+  Coalesce(Object_Schema_Name(referencing_id) + '.', '') + --likely schema name
+  Object_Name(referencing_id)
+  + --definite entity name
+  Coalesce('.' + Col_Name(referencing_id, referencing_minor_id), '') AS referenced
+  FROM sys.sql_expression_dependencies
+  WHERE referenced_id = Object_Id('Chinook.Artist')
+  ORDER BY referenced
+
+  --Note: Since this is an example database and I haven't utilized any stored procedures or functions yet these results would be blank
+
+  /* Below is a custom function made by Phil Factor (listed in references at the end) that gives you the order in which database objects should be created
+  for a build to be without errors. Again it isn't useful yet since there won't be many dependencies, but I find it a great function to have */
+
+  CREATE FUNCTION dbo.DependencyOrder ()
+  RETURNS @DependencyOrder TABLE
+  (
+  TheSchema VARCHAR(120) NULL,
+  TheName VARCHAR(120) NOT NULL,
+  Object_id INT PRIMARY KEY,
+  TheOrder INT NOT NULL,
+  iterations INT NULL,
+  ExternalDependency VARCHAR(2000) NULL
+  )
+AS
+  -- body of the function
+  BEGIN
+    DECLARE @ii INT, @EndlessLoop INT, @Rowcount INT;
+    SELECT @ii = 1, @EndlessLoop = 10, @Rowcount = 1;
+    WHILE @Rowcount > 0 AND @EndlessLoop > 0
+      BEGIN
+        ;WITH candidates (object_ID, Parent_object_id)
+         AS (SELECT sys.objects.object_id, sys.objects.parent_object_id
+               FROM sys.objects
+                 LEFT OUTER JOIN @DependencyOrder AS Dep 
+                 --not in the dependency table already
+                   ON Dep.Object_id = objects.object_id
+               WHERE Dep.Object_id IS NULL AND type NOT IN ('s', 'sq', 'it'))
+        INSERT INTO @DependencyOrder (TheSchema, TheName, Object_id, TheOrder)
+        SELECT Object_Schema_Name(c.object_ID), Object_Name(c.object_ID),
+          c.object_ID, @ii
+          FROM candidates AS c
+            INNER JOIN @DependencyOrder AS parent
+              ON c.Parent_object_id = parent.Object_id
+        UNION
+        SELECT Object_Schema_Name(object_ID), Object_Name(object_ID),
+          object_ID, @ii
+          FROM candidates AS c
+          WHERE Parent_object_id = 0
+            AND object_ID NOT IN
+                  (
+                  SELECT c.object_ID
+                    FROM candidates AS c
+                      INNER JOIN sys.sql_expression_dependencies
+                        ON Object_id = referencing_id
+                      LEFT OUTER JOIN @DependencyOrder AS ReferedTo
+                        ON ReferedTo.Object_id = referenced_id
+                    WHERE ReferedTo.Object_id IS NULL
+                      AND referenced_id IS NOT NULL 
+                      --not a cross-database dependency
+                  );
+        SET @Rowcount = @@RowCount;
+        SELECT @ii = @ii + 1, @EndlessLoop = @EndlessLoop - 1;
+      END;
+    UPDATE @DependencyOrder SET iterations = @ii - 1;
+    UPDATE @DependencyOrder
+      SET ExternalDependency = ListOfDependencies
+      FROM
+        (
+        SELECT Object_id,
+          Stuff(
+                 (
+                 SELECT ', ' + Coalesce(referenced_server_name + '.', '')
+                        + Coalesce(referenced_database_name + '.', '')
+                        + Coalesce(referenced_schema_name + '.', '')
+                        + referenced_entity_name
+                   FROM sys.sql_expression_dependencies AS sed
+                   WHERE sed.referencing_id = externalRefs.object_ID
+                     AND referenced_database_name IS NOT NULL
+                     AND is_ambiguous = 0
+                 FOR XML PATH(''), ROOT('i'), TYPE
+                 ).value('/i[1]', 'varchar(max)'),1,2,'' ) 
+                     AS ListOfDependencies
+          FROM @DependencyOrder AS externalRefs
+        ) AS f
+        INNER JOIN @DependencyOrder AS d
+          ON f.Object_id = d.Object_id;
+ 
+    RETURN;
+  END;
+GO
+
+Select * from dbo.DependencyOrder() order by theorder desc
+
+-- Finding foreign key relationship tables to have a better idea of cross table relationships 
+
+--Independent tables 
+
+	SELECT  Name AS IndependentTables
+	FROM    sys.tables
+	WHERE   object_id NOT IN ( SELECT referenced_object_id
+	                             FROM   sys.foreign_key_columns )
+                                               
+	        AND object_id NOT IN ( SELECT parent_object_id
+	                                 FROM   sys.foreign_key_columns )
+                                              
+	ORDER BY Name
+
+-- Tables with dependencies.
+	SELECT DISTINCT
+	        OBJECT_NAME(referenced_object_id) AS ParentTable ,
+	        OBJECT_NAME(parent_object_id) AS DependentTable ,
+	        OBJECT_NAME(constraint_object_id) AS ForeignKeyName
+	FROM    sys.foreign_key_columns
+	ORDER BY ParentTable ,
+	        DependentTable
+
+-- Tables with no parents.
+	SELECT DISTINCT
+	        OBJECT_NAME(referenced_object_id) AS TablesWithNoParent
+	FROM    sys.foreign_key_columns
+	WHERE   referenced_object_id NOT IN ( SELECT  parent_object_id
+	                                        FROM    sys.foreign_key_columns )
+	ORDER BY 1
+
+-- Tables with no dependents. 
+	SELECT DISTINCT
+	        OBJECT_NAME(parent_object_id) AS TablesWithNoDependents
+	FROM    sys.foreign_key_columns
+	WHERE   parent_object_id NOT IN ( SELECT  referenced_object_id
+	                                    FROM    sys.foreign_key_columns )
+	ORDER BY 1
+
+-- Tables with dependents and parents
+
+	SELECT DISTINCT
+			OBJECT_NAME(parent_object_id) AS TablesWithParDep
+	FROM sys.foreign_key_columns
+	WHERE parent_object_id IN ( SELECT referenced_object_id
+									FROM sys.foreign_key_columns )
+	  AND parent_object_id NOT IN ( SELECT  referenced_object_id
+	                                        FROM    sys.foreign_key_columns )
+	ORDER BY 1
+
+-- Recursive dependencies
+
+SELECT DISTINCT
+	        OBJECT_NAME(referenced_object_id) AS ParentTable ,
+	        OBJECT_NAME(parent_object_id) AS ChildTable ,
+	        OBJECT_NAME(constraint_object_id) AS ForeignKeyName
+	FROM    sys.foreign_key_columns
+	WHERE   referenced_object_id = parent_object_id
+	ORDER BY 1 ,
+	        2;
+
+-- Using Common Table Expression to deal with recursive queries
+	
+    WITH    TableHierarchy ( ParentTable, DependentTable, Level )
+	          AS (
+	               SELECT DISTINCT
+	                        CAST(NULL AS INT) AS ParentTable ,
+	                        e.referenced_object_id AS DependentTable ,
+	                        0 AS Level
+	               FROM     sys.foreign_key_columns AS e
+	               WHERE    e.referenced_object_id NOT IN (
+	                        SELECT  parent_object_id
+	                        FROM    sys.foreign_key_columns )
+	               UNION ALL
+	
+	               SELECT --Distinct
+	                        e.referenced_object_id AS ParentTable ,
+	                        e.parent_object_id AS DependentTable ,
+	                        Level + 1
+	               FROM     sys.foreign_key_columns AS e
+	                        INNER JOIN TableHierarchy AS d
+                               ON ( e.referenced_object_id ) = 
+                                                      d.DependentTable
+	             )
+	    
+	SELECT DISTINCT
+	        OBJECT_NAME(ParentTable) AS ParentTable ,
+	        OBJECT_NAME(DependentTable) AS DependentTable ,
+	        Level
+	FROM    TableHierarchy
+	ORDER BY Level ,
+	        ParentTable ,
+	        DependentTable;
+
+/* References:
+https://github.com/lerocha/chinook-database
+https://www.red-gate.com/simple-talk/sql/database-administration/exploring-your-sql-server-databases-with-t-sql/
+https://www.red-gate.com/simple-talk/sql/t-sql-programming/dependencies-and-references-in-sql-server/
+	
